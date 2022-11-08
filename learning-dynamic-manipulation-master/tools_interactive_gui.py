@@ -13,7 +13,7 @@ from PyQt5 import QtWidgets, QtGui
 from PyQt5.QtCore import Qt, QMutex
 
 from envs import VectorEnv, orientation_to_heading
-from policies import MultiFreqPolicy
+from policies import DQNPolicy, DQNIntentionPolicy
 import utils
 
 
@@ -486,7 +486,7 @@ def main(args):
         cfg = utils.load_config(args.config_path)
         print(args.config_path)
         env = utils.get_env_from_cfg(cfg, **kwargs)
-        policy = MultiFreqPolicy(cfg)
+        policy = DQNIntentionPolicy(cfg)
 
     else:
         # Env name
