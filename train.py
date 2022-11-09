@@ -21,7 +21,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import utils
-from policies import MultiFreqPolicy, DQNPolicy
+from policies import DQNPolicy
 
 torch.backends.cudnn.benchmark = True
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -47,73 +47,18 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-# class MultiFreqTransitionTracker:
-#     def __init__(self, initial_state, accumulate_rewards=True):
-#         self.state = initial_state[0][0]
-#         self.accumulate_rewards = accumulate_rewards
-
-#         self.state_high = None
-#         self.action_high = None
-#         self.reward_high = None
-
-#         self.state_mid = None
-#         self.action_mid = None
-#         self.reward_mid = None
-
-#         self.state_low = None
-#         self.action_low = None
-#         self.reward_low = None
-
-#     def step(self, action, policy_info, reward, next_state):
-#         transitions_per_level = [[], [], []]  # high mid low
-#         for level in policy_info['levels']:
-#             # Generate transitions
-#             if self.action_low is not None:
-#                 if self.accumulate_rewards:
-#                     self.reward_mid += self.reward_low
-#                 transition = (self.state_low, self.action_low, self.reward_low, self.state)
-#                 transitions_per_level[2].append(transition)
-#                 self.action_low = None
-#             if level in ['h', 'm'] and self.action_mid is not None:
-#                 if self.accumulate_rewards:
-#                     self.reward_high += self.reward_mid
-#                 transition = (self.state_mid, self.action_mid, self.reward_mid, self.state)
-#                 transitions_per_level[1].append(transition)
-#                 self.action_mid = None
-#             if level == 'h' and self.action_high is not None:
-#                 transition = (self.state_high, self.action_high, self.reward_high, self.state)
-#                 transitions_per_level[0].append(transition)
-#                 self.action_high = None
-
-#             # Store new action
-#             if level == 'h':
-#                 self.state_high = self.state
-#                 self.action_high = action[0][0]
-#                 self.reward_high = reward[0][0]
-#             elif level == 'm':
-#                 self.state_mid = self.state
-#                 self.action_mid = action[0][0]
-#                 self.reward_mid = reward[0][0]
-#             elif level == 'l':
-#                 self.state_low = self.state
-#                 self.action_low = action[0][0]
-#                 self.reward_low = reward[0][0]
-
-#         # Update current state
-#         self.state = next_state[0][0]
-
-#         return transitions_per_level
-
 class TransitionTracker:
     def __init__(self, initial_state):
         self.num_buffers = len(initial_state)
         self.prev_state = initial_state
         self.prev_action = [[None for _ in g] for g in self.prev_state]
+
     def update_action(self, action):
         for i, g in enumerate(action):
             for j, a in enumerate(g):
                 if a is not None:
                     self.prev_action[i][j] = a
+
     def update_step_completed(self, reward, state, done):
         transitions_per_buffer = [[] for _ in range(self.num_buffers)]
         for i, g in enumerate(state):
@@ -223,14 +168,14 @@ class CollectWorker(Process):
     def run(self):
         try:
             self._setup()
-            self.conn.send(([], False, None))  # transitions_per_level, done, logging_info
+            self.conn.send(([], False, None))  # transitions_per_buffer, done, logging_info
             while True:
                 self.conn.send(self.state)
-                action, policy_info = self.conn.recv()
+                action = self.conn.recv()
                 if action == 'close':
                     self.close()
                     break
-                self.conn.send(self.step(action, policy_info))
+                self.conn.send(self.step(action))
         except Exception as e:
             tb = traceback.format_exc()
             self.conn.send((e, tb))
@@ -238,26 +183,26 @@ class CollectWorker(Process):
     def get_state(self):
         return self.state
 
-    def step(self, action, policy_info):
+    def step(self, action):
         self.transition_tracker.update_action(action)
         self.state, reward, done, info = self.env.step(action)
-        transitions_per_level = self.transition_tracker.step(action, policy_info, reward, self.state)
+        transitions_per_buffer = self.transition_tracker.update_step_completed(reward, self.state, done)
 
         logging_info = None
         if done:
             # Logging
             logging_info = {'scalars': {}, 'images': {}}
-            for name in ['steps', 'simulation_steps', 'total_objects', 'total_obstacle_collisions']:
+            for name in ['steps', 'simulation_steps', 'total_objects', 'total_obstacle_collisions', 'total_robot_collisions']:
                 logging_info['scalars'][f'total/{name}'] = info[name]
             for i in range(self.num_robot_groups):
-                for name in ['cumulative_objects', 'cumulative_distance', 'cumulative_reward', 'cumulative_obstacle_collisions']:
+                for name in ['cumulative_objects', 'cumulative_distance', 'cumulative_reward', 'cumulative_obstacle_collisions', 'cumulative_robot_collisions']:
                     logging_info['scalars'][f'cumulative/{name}/robot_group_{i + 1:02}'] = np.mean(info[name][i])
 
             # Reset env
             self.state = self.env.reset()
-            self.transition_tracker = MultiFreqTransitionTracker(self.state, accumulate_rewards=self.cfg.accumulate_lower_level_rewards)
+            self.transition_tracker = TransitionTracker(self.state)
 
-        return transitions_per_level, done, logging_info
+        return transitions_per_buffer, done, logging_info
 
     def close(self):
         self.env.close()
@@ -265,6 +210,7 @@ class CollectWorker(Process):
 class Collector:
     def __init__(self, cfg, policy, logger, num_workers=None):
         self.cfg = cfg
+        self.policy = policy
         self.logger = logger
         self.num_workers = num_workers
 
@@ -272,7 +218,6 @@ class Collector:
             self.curr_worker_index = 0
             self.workers = []
             self.conns = []
-            self.multi_freq_policies = []
             for i in range(num_workers):
                 parent_conn, child_conn = Pipe()
                 worker = CollectWorker(self.cfg, worker_index=i, conn=child_conn)
@@ -280,17 +225,14 @@ class Collector:
                 worker.start()
                 self.workers.append(worker)
                 self.conns.append(parent_conn)
-                # Each instantiation keeps track of its own state to determine whether to use high or low level
-                self.multi_freq_policies.append(MultiFreqPolicy(self.cfg, policy.policy_high, policy.policy_mid, policy.policy_low))
             self._step_fn = self._step_multiprocess
         else:
             self.worker = CollectWorker(self.cfg)
             self._step_fn = self._step
-            self.multi_freq_policy = MultiFreqPolicy(self.cfg, policy.policy_high, policy.policy_mid, policy.policy_low)
 
     def step(self, exploration_eps):
         collect_start_time = time.time()
-        transitions_per_level, done, logging_info = self._step_fn(exploration_eps)
+        transitions_per_buffer, done, logging_info = self._step_fn(exploration_eps)
 
         # Logging
         if done:
@@ -302,29 +244,24 @@ class Collector:
         collect_time = time.time() - collect_start_time
         self.logger.update('timing/collect_time', collect_time, add_hostname=True)
 
-        return transitions_per_level, done
+        return transitions_per_buffer, done
 
     def _step(self, exploration_eps):
         state = self.worker.get_state()
-        action, policy_info = self.multi_freq_policy.step(state, exploration_eps=exploration_eps, debug=True)
-        transitions_per_level, done, logging_info = self.worker.step(action, policy_info)
-        if done:
-            self.multi_freq_policy.reset()
-        return transitions_per_level, done, logging_info
+        action = self.policy.step(state, exploration_eps=exploration_eps)
+        return self.worker.step(action)
 
     def _step_multiprocess(self, exploration_eps):
         step_result = self.conns[self.curr_worker_index].recv()
         if isinstance(step_result[0], Exception):
             e, tb = step_result
             raise e from Exception(tb)
-        transitions_per_level, done, logging_info = step_result
-        if done:
-            self.multi_freq_policies[self.curr_worker_index].reset()
+        transitions_per_buffer, done, logging_info = step_result
         state = self.conns[self.curr_worker_index].recv()
-        action, policy_info = self.multi_freq_policies[self.curr_worker_index].step(state, exploration_eps=exploration_eps, debug=True)
-        self.conns[self.curr_worker_index].send((action, policy_info))
+        action = self.policy.step(state, exploration_eps=exploration_eps)
+        self.conns[self.curr_worker_index].send(action)
         self.curr_worker_index = (self.curr_worker_index + 1) % self.num_workers
-        return transitions_per_level, done, logging_info
+        return transitions_per_buffer, done, logging_info
 
     def close(self):
         if self.num_workers is None:
@@ -333,7 +270,7 @@ class Collector:
             for conn in self.conns:
                 conn.recv()
                 conn.recv()
-                conn.send(('close', None))
+                conn.send('close')
             for worker in self.workers:
                 worker.join()
 
@@ -344,30 +281,21 @@ class Trainer:
         self.logger = logger
         self.num_robot_groups = self.policy.num_robot_groups
         self.step_time_meter = AverageMeter()
-        assert self.num_robot_groups == 1  # Multi-agent not implemented
 
         # Set up checkpointing
         self.checkpoint_dir = Path(self.cfg.checkpoint_dir)
         print(f'checkpoint_dir: {self.checkpoint_dir}')
 
-        # Optimizers
-        self.optimizers_high = []
-        self.optimizers_mid = []
-        self.optimizers_low = []
-        for i in range(self.num_robot_groups):
-            self.optimizers_high.append(optim.SGD(self.policy.policy_high.policy_nets[i].parameters(), lr=self.cfg.learning_rate, momentum=0.9, weight_decay=self.cfg.weight_decay))
-            self.optimizers_mid.append(optim.SGD(self.policy.policy_mid.policy_nets[i].parameters(), lr=self.cfg.learning_rate, momentum=0.9, weight_decay=self.cfg.weight_decay))
-            self.optimizers_low.append(optim.SGD(self.policy.policy_low.policy_nets[i].parameters(), lr=self.cfg.learning_rate, momentum=0.9, weight_decay=self.cfg.weight_decay))
-
         # Replay buffers
-        self.replay_buffers_high = [ReplayBuffer(self.cfg.replay_buffer_size) for _ in range(self.num_robot_groups)]
-        self.replay_buffers_mid = [ReplayBuffer(self.cfg.replay_buffer_size) for _ in range(self.num_robot_groups)]
-        self.replay_buffers_low = [ReplayBuffer(self.cfg.replay_buffer_size) for _ in range(self.num_robot_groups)]
+        self.replay_buffers = [ReplayBuffer(self.cfg.replay_buffer_size) for _ in range(self.num_robot_groups)]
+
+        # Optimizers
+        self.optimizers = []
+        for i in range(self.num_robot_groups):
+            self.optimizers.append(optim.SGD(self.policy.policy_nets[i].parameters(), lr=self.cfg.learning_rate, momentum=0.9, weight_decay=self.cfg.weight_decay))
 
         # Target nets
-        self.target_nets_high = self.policy.policy_high.build_policy_nets()
-        self.target_nets_mid = self.policy.policy_mid.build_policy_nets()
-        self.target_nets_low = self.policy.policy_low.build_policy_nets()
+        self.target_nets = self.policy.build_policy_nets()
 
     def setup(self):
         start_timestep = 0
@@ -379,22 +307,14 @@ class Trainer:
             start_timestep = checkpoint['timestep']
             num_episodes = checkpoint['episodes']
             for i in range(self.num_robot_groups):
-                self.optimizers_high[i].load_state_dict(checkpoint['optimizers_high'][i])
-                self.replay_buffers_high[i] = checkpoint['replay_buffers_high'][i]
-                self.optimizers_mid[i].load_state_dict(checkpoint['optimizers_mid'][i])
-                self.replay_buffers_mid[i] = checkpoint['replay_buffers_mid'][i]
-                self.optimizers_low[i].load_state_dict(checkpoint['optimizers_low'][i])
-                self.replay_buffers_low[i] = checkpoint['replay_buffers_low'][i]
+                self.optimizers[i].load_state_dict(checkpoint['optimizers'][i])
+                self.replay_buffers[i] = checkpoint['replay_buffers'][i]
             print(f"=> loaded checkpoint '{self.cfg.checkpoint_path}' (timestep {start_timestep})")
 
         # Set up target nets
         for i in range(self.num_robot_groups):
-            self.target_nets_high[i].load_state_dict(self.policy.policy_high.policy_nets[i].state_dict())
-            self.target_nets_high[i].eval()
-            self.target_nets_mid[i].load_state_dict(self.policy.policy_mid.policy_nets[i].state_dict())
-            self.target_nets_mid[i].eval()
-            self.target_nets_low[i].load_state_dict(self.policy.policy_low.policy_nets[i].state_dict())
-            self.target_nets_low[i].eval()
+            self.target_nets[i].load_state_dict(self.policy.policy_nets[i].state_dict())
+            self.target_nets[i].eval()
 
         return start_timestep, num_episodes
 
@@ -433,39 +353,20 @@ class Trainer:
 
         return train_info
 
-    def store_transitions(self, transitions_per_level):
-        transitions_high, transitions_mid, transitions_low = transitions_per_level
-        for transition in transitions_high:
-            self.replay_buffers_high[0].push(*transition)
-        for transition in transitions_mid:
-            self.replay_buffers_mid[0].push(*transition)
-        for transition in transitions_low:
-            self.replay_buffers_low[0].push(*transition)
+    def store_transitions(self, transitions_per_buffer):
+        for i, transitions in enumerate(transitions_per_buffer):
+            for transition in transitions:
+                self.replay_buffers[i].push(*transition)
 
     def step(self):
         train_start_time = time.time()
         all_train_info = {}
         for i in range(self.num_robot_groups):
-            train_info_high = self._train(
-                self.policy.policy_high.policy_nets[i], self.target_nets_high[i],
-                self.optimizers_high[i], self.replay_buffers_high[i].sample(self.cfg.batch_size),
-                self.policy.policy_high.apply_transform, self.cfg.discount_factors[i])
-            for name, val in train_info_high.items():
-                all_train_info[f'train/{name}_high/robot_group_{i + 1:02}'] = val
-            if self.cfg.num_mid_steps_per_high_step > 0:
-                train_info_mid = self._train(
-                    self.policy.policy_mid.policy_nets[i], self.target_nets_mid[i],
-                    self.optimizers_mid[i], self.replay_buffers_mid[i].sample(self.cfg.batch_size),
-                    self.policy.policy_mid.apply_transform, self.cfg.discount_factors[i])
-                for name, val in train_info_mid.items():
-                    all_train_info[f'train/{name}_mid/robot_group_{i + 1:02}'] = val
-                if self.cfg.num_low_steps_per_mid_step > 0:
-                    train_info_low = self._train(
-                        self.policy.policy_low.policy_nets[i], self.target_nets_low[i],
-                        self.optimizers_low[i], self.replay_buffers_low[i].sample(self.cfg.batch_size),
-                        self.policy.policy_low.apply_transform, self.cfg.discount_factors[i])
-                    for name, val in train_info_low.items():
-                        all_train_info[f'train/{name}_low/robot_group_{i + 1:02}'] = val
+            assert len(self.replay_buffers[i]) >= self.cfg.batch_size
+            batch = self.replay_buffers[i].sample(self.cfg.batch_size)
+            train_info = self._train(self.policy.policy_nets[i], self.target_nets[i], self.optimizers[i], batch, self.policy.apply_transform, self.cfg.discount_factors[i])
+            for name, val in train_info.items():
+                all_train_info[f'train/{name}/robot_group_{i + 1:02}'] = val
         train_time = time.time() - train_start_time
         self.logger.update('timing/train_time', train_time, add_hostname=True)
         for name, val in all_train_info.items():
@@ -473,9 +374,16 @@ class Trainer:
 
     def update_target_networks(self):
         for i in range(self.num_robot_groups):
-            self.target_nets_high[i].load_state_dict(self.policy.policy_high.policy_nets[i].state_dict())
-            self.target_nets_mid[i].load_state_dict(self.policy.policy_mid.policy_nets[i].state_dict())
-            self.target_nets_low[i].load_state_dict(self.policy.policy_low.policy_nets[i].state_dict())
+            self.target_nets[i].load_state_dict(self.policy.policy_nets[i].state_dict())
+
+    def write_logs(self):
+        # Visualize Q-network outputs
+        assert all(len(self.replay_buffers[i]) > 0 for i in range(self.num_robot_groups))
+        random_state = [[random.choice(self.replay_buffers[i].buffer).state] for i in range(self.num_robot_groups)]
+        _, info = self.policy.step(random_state, debug=True)
+        for i in range(self.num_robot_groups):
+            visualization = utils.get_state_output_visualization(random_state[i][0], info['output'][i][0])
+            self.logger.image(f'q_network/robot_group_{i + 1:02}', visualization.transpose((2, 0, 1)))
 
     def save_checkpoint(self, timestep, num_episodes):
         if not self.checkpoint_dir.exists():
@@ -486,9 +394,7 @@ class Trainer:
         policy_path = self.checkpoint_dir / policy_filename
         policy_checkpoint = {
             'timestep': timestep,
-            'state_dicts_high': [self.policy.policy_high.policy_nets[i].state_dict() for i in range(self.num_robot_groups)],
-            'state_dicts_mid': [self.policy.policy_mid.policy_nets[i].state_dict() for i in range(self.num_robot_groups)],
-            'state_dicts_low': [self.policy.policy_low.policy_nets[i].state_dict() for i in range(self.num_robot_groups)],
+            'state_dicts': [self.policy.policy_nets[i].state_dict() for i in range(self.num_robot_groups)],
         }
         torch.save(policy_checkpoint, str(policy_path))
 
@@ -498,12 +404,8 @@ class Trainer:
         checkpoint = {
             'timestep': timestep,
             'episodes': num_episodes,
-            'optimizers_high': [self.optimizers_high[i].state_dict() for i in range(self.num_robot_groups)],
-            'optimizers_mid': [self.optimizers_mid[i].state_dict() for i in range(self.num_robot_groups)],
-            'optimizers_low': [self.optimizers_low[i].state_dict() for i in range(self.num_robot_groups)],
-            'replay_buffers_high': [self.replay_buffers_high[i] for i in range(self.num_robot_groups)],
-            'replay_buffers_mid': [self.replay_buffers_mid[i] for i in range(self.num_robot_groups)],
-            'replay_buffers_low': [self.replay_buffers_low[i] for i in range(self.num_robot_groups)],
+            'optimizers': [self.optimizers[i].state_dict() for i in range(self.num_robot_groups)],
+            'replay_buffers': [self.replay_buffers[i] for i in range(self.num_robot_groups)],
         }
         torch.save(checkpoint, str(checkpoint_path))
 
@@ -519,10 +421,21 @@ class Trainer:
             old_checkpoint_path.unlink()
 
 def main(cfg):
-    num_robots = sum(sum(g.values()) for g in cfg.robot_config)
-    assert num_robots == 1  # Multi-agent not implemented
+    # Not implemented in multiprocess training
+    assert not cfg.use_predicted_intention
 
-    policy = MultiFreqPolicy(cfg, train=True)
+    # Set default multiprocess args if not specified
+    if 'checkpoint_freq_mins' not in cfg:
+        cfg.checkpoint_freq_mins = 30  # Checkpoint every 30 mins
+    if 'num_parallel_collectors' not in cfg:
+        if sys.platform == 'darwin':
+            cfg.num_parallel_collectors = None
+        else:
+            cfg.num_parallel_collectors = 8  # 8 collect workers
+    if cfg.use_egl_renderer:
+        cfg.use_egl_renderer = False  # Disable EGL rendering since multiprocessing is much faster
+
+    policy = DQNPolicy(cfg, train=True)
     logger = Logger(cfg)
     collector = Collector(cfg, policy, logger, num_workers=cfg.num_parallel_collectors)
     trainer = Trainer(cfg, policy, logger)
@@ -539,10 +452,10 @@ def main(cfg):
 
         # Run one collect step
         exploration_eps = 1 - (1 - cfg.final_exploration) * min(1, max(0, timestep - learning_starts) / (cfg.exploration_frac * cfg.total_timesteps))
-        transitions_per_level, done = collector.step(exploration_eps)
+        transitions_per_buffer, done = collector.step(exploration_eps)
 
         # Store transitions
-        trainer.store_transitions(transitions_per_level)
+        trainer.store_transitions(transitions_per_buffer)
 
         # Train networks
         if timestep >= learning_starts and (timestep + 1) % cfg.train_freq == 0:
@@ -554,6 +467,8 @@ def main(cfg):
 
         # Logging
         if done:
+            if timestep >= learning_starts:
+                trainer.write_logs()
             num_episodes += 1
             logger.scalar('train/episodes', num_episodes)
             logger.scalar('train/exploration_eps', exploration_eps)
@@ -587,7 +502,7 @@ if __name__ == '__main__':
     config_path = parser.parse_args().config_path
     if config_path is None:
         if sys.platform == 'darwin':
-            config_path = 'config/local/blowing_1-small_empty-local.yml'
+            config_path = 'config/local/blowing_4-small_empty-local.yml'
         else:
             config_path = utils.select_run()
     if config_path is not None:
