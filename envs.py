@@ -1,4 +1,5 @@
 import math
+import pkgutil
 from abc import ABC, abstractmethod
 from multiprocessing.connection import Client
 from pathlib import Path
@@ -44,6 +45,10 @@ class VectorEnv:
             blowing_wind_particle_radius=0.003, blowing_wind_particle_mass=0.001, blowing_force=0.35,
             overhead_map_scale=1.0,
             use_robot_map=True, robot_map_scale=1.0,
+            use_intention_map=False, intention_map_encoding='ramp',
+            intention_map_scale=1.0, intention_map_line_thickness=2,
+            use_history_map=False,
+            use_intention_channels=False, intention_channel_encoding='spatial', intention_channel_nonspatial_scale=0.025,
             use_distance_to_receptacle_map=False, distance_to_receptacle_map_scale=0.25,
             use_shortest_path_to_receptacle_map=True, use_shortest_path_map=True, shortest_path_map_scale=0.25,
             use_shortest_path_partial_rewards=True, success_reward=1.0,
@@ -51,7 +56,7 @@ class VectorEnv:
             obstacle_collision_penalty=0.25, robot_collision_penalty=1.0,
             use_shortest_path_movement=True, use_partial_observations=True,
             inactivity_cutoff_per_robot=100,
-            random_seed=None,
+            random_seed=None,use_egl_renderer=False,real_cube_indices=None,
             show_gui=False, show_trajectories=False, show_debug_annotations=False, show_occupancy_maps=False,
             real=False, real_robot_indices=None, real_debug=False,
         ):
@@ -101,6 +106,8 @@ class VectorEnv:
         self.use_partial_observations = use_partial_observations
         self.inactivity_cutoff_per_robot = inactivity_cutoff_per_robot
         self.random_seed = random_seed
+        self.use_egl_renderer = use_egl_renderer
+        self.real_cube_indices = real_cube_indices
 
         # Debugging
         self.show_gui = show_gui
@@ -113,6 +120,16 @@ class VectorEnv:
         self.real_robot_indices = real_robot_indices
         self.real_debug = real_debug
 
+        # multi-agent
+        self.use_intention_map = use_intention_map
+        self.intention_map_encoding = intention_map_encoding
+        self.intention_map_scale = intention_map_scale
+        self.intention_map_line_thickness = intention_map_line_thickness
+        self.use_history_map = use_history_map
+        self.use_intention_channels = use_intention_channels
+        self.intention_channel_encoding = intention_channel_encoding
+        self.intention_channel_nonspatial_scale = intention_channel_nonspatial_scale
+
         pprint(self.__dict__)
 
         ################################################################################
@@ -123,6 +140,9 @@ class VectorEnv:
             self.p.configureDebugVisualizer(pybullet.COV_ENABLE_GUI, 0)
         else:
             self.p = bc.BulletClient(connection_mode=pybullet.DIRECT)
+            if self.use_egl_renderer:
+                assert sys.platform == 'linux'  # Linux only
+                self.plugin_id = self.p.loadPlugin(pkgutil.get_loader('eglRenderer').get_filename(), "_eglRendererPlugin")
 
         self.p.resetDebugVisualizerCamera(
             0.47 + (5.25 - 0.47) / (10 - 0.7) * (self.room_length - 0.7), 0, -70,
@@ -325,6 +345,7 @@ class VectorEnv:
             'cumulative_robot_collisions': [[robot.cumulative_robot_collisions if (robot.awaiting_new_action or done) else None for robot in g] for g in self.robot_groups],
             'total_objects': sum(robot.cumulative_objects for robot in self.robots),
             'total_obstacle_collisions': sum(robot.cumulative_obstacle_collisions for robot in self.robots),
+            'total_robot_collisions': sum(robot.cumulative_robot_collisions for robot in self.robots),
         }
 
         return state, reward, done, info
@@ -1474,6 +1495,12 @@ class RobotController:
         if isinstance(self.robot, BlowingRobot):
             self.robot.blow_objects()
 
+    def get_intention_path(self):
+        return [self.robot.get_position()] + self.robot.waypoint_positions[self.waypoint_index:-1] + [self.robot.target_end_effector_position]
+
+    def get_history_path(self):
+        return self.robot.waypoint_positions[:self.waypoint_index] + [self.robot.get_position()]
+
 class RealRobotController:
     LOOKAHEAD_DISTANCE = 0.1  # 10 cm
     TURN_THRESHOLD = math.radians(5)  # 5 deg
@@ -1871,6 +1898,9 @@ class Mapper:
         if self.env.use_distance_to_receptacle_map:
             self.global_distance_to_receptacle_map = self._create_global_distance_to_receptacle_map()
 
+        # Intention map
+        self.intention_map_selem = disk(self.env.intention_map_line_thickness - 1)
+
         # Assertions
         if self.env.use_distance_to_receptacle_map or self.env.use_shortest_path_to_receptacle_map:
             assert self.env.receptacle_id is not None
@@ -1932,6 +1962,23 @@ class Mapper:
             local_shortest_path_map = self._get_local_distance_map(global_shortest_path_map)
             channels.append(local_shortest_path_map)
 
+        # History map
+        if self.env.use_history_map:
+            global_history_map = self._create_global_intention_or_history_map(encoding='history')
+            local_history_map = self._get_local_map(global_history_map)
+            channels.append(local_history_map)
+
+        # Intention map
+        if self.env.use_intention_map:
+            global_intention_map = self._create_global_intention_or_history_map(encoding=self.env.intention_map_encoding)
+            local_intention_map = self._get_local_map(global_intention_map)
+            channels.append(local_intention_map)
+
+        # Baseline intention channels
+        if self.env.use_intention_channels:
+            intention_channels = self._get_intention_channels()
+            channels.extend(intention_channels)
+
         if save_figures:
             from PIL import Image; import utils  # pylint: disable=import-outside-toplevel
             output_dir = Path('figures') / 'robot_id_{}'.format(self.robot.id)
@@ -1982,6 +2029,19 @@ class Mapper:
             # Shortest path distance map
             if self.env.use_shortest_path_map:
                 save_map_visualization(global_shortest_path_map, local_shortest_path_map, 'shortest-path-map', brightness_scale_factor=2)
+
+            # History map
+            if self.env.use_history_map:
+                save_map_visualization(global_history_map, local_history_map, 'history-map')
+
+            # Intention map
+            if self.env.use_intention_map:
+                save_map_visualization(global_intention_map, local_intention_map, 'intention-map')
+
+            # Baseline intention channels
+            if self.env.use_intention_channels:
+                for i, channel in enumerate(intention_channels):
+                    utils.enlarge_image(Image.fromarray(utils.to_uint8_image(visualize_map(local_overhead_map_vis, np.abs(channel))))).save(output_dir / 'intention-channel{}.png'.format(i))
 
             # Occupancy map
             if self.env.show_occupancy_maps:
@@ -2098,6 +2158,84 @@ class Mapper:
         global_map *= self.env.shortest_path_map_scale
         #from PIL import Image; import utils; Image.fromarray(utils.to_uint8_image(global_map)).show()
         return global_map
+
+    def _create_global_intention_or_history_map(self, encoding):
+        global_intention_map = self._create_padded_room_zeros()
+        for robot in self.env.robots:
+            if robot is self.robot or robot.is_idle():
+                continue
+
+            if encoding == 'circle':
+                target_i, target_j = Mapper.position_to_pixel_indices(robot.target_end_effector_position[0], robot.target_end_effector_position[1], global_intention_map.shape)
+                global_intention_map[target_i, target_j] = self.env.intention_map_scale
+                continue
+
+            if encoding in {'ramp', 'binary', 'line'}:
+                waypoint_positions = robot.controller.get_intention_path()
+                if encoding == 'line':
+                    waypoint_positions = [waypoint_positions[0], waypoint_positions[-1]]
+            elif encoding == 'history':
+                waypoint_positions = robot.controller.get_history_path()[::-1]
+
+            path_length = 0
+            for i in range(1, len(waypoint_positions)):
+                source_position = waypoint_positions[i - 1]
+                target_position = waypoint_positions[i]
+                segment_length = self.env.intention_map_scale * distance(source_position, target_position)
+
+                source_i, source_j = Mapper.position_to_pixel_indices(source_position[0], source_position[1], global_intention_map.shape)
+                target_i, target_j = Mapper.position_to_pixel_indices(target_position[0], target_position[1], global_intention_map.shape)
+                rr, cc = line(source_i, source_j, target_i, target_j)
+
+                if encoding in {'binary', 'line'}:
+                    if i < len(waypoint_positions) - 1:
+                        rr, cc = rr[:-1], cc[:-1]
+                    global_intention_map[rr, cc] = self.env.intention_map_scale
+                elif encoding in {'ramp', 'history'}:
+                    line_values = np.clip(np.linspace(1 - path_length, 1 - (path_length + segment_length), len(rr)), 0, 1)
+                    if i < len(waypoint_positions) - 1:
+                        rr, cc = rr[:-1], cc[:-1]
+                        line_values = line_values[:-1]
+                    global_intention_map[rr, cc] = np.maximum(global_intention_map[rr, cc], line_values)
+
+                path_length += segment_length
+
+        # Make lines thicker
+        if self.env.intention_map_line_thickness > 1:
+            global_intention_map = dilation(global_intention_map, self.intention_map_selem)
+
+        return global_intention_map
+
+    def _get_intention_channels(self):
+        robot_position, robot_heading = self.robot.get_position(), self.robot.get_heading()
+        dists = [distance(robot_position, robot.get_position()) for robot in self.env.robots]
+
+        # Arrange channels in order from closest robot to furthest robot
+        channels = []
+        for i in np.argsort(dists):
+            robot = self.env.robots[i]
+
+            if robot is self.robot:
+                continue
+
+            if self.env.intention_channel_encoding == 'spatial':
+                global_map = self._create_padded_room_zeros()
+                if not robot.is_idle():
+                    target_i, target_j = Mapper.position_to_pixel_indices(robot.target_end_effector_position[0], robot.target_end_effector_position[1], global_map.shape)
+                    global_map[target_i, target_j] = self.env.intention_map_scale
+                    global_map = dilation(global_map, self.intention_map_selem)
+                channels.append(self._get_local_map(global_map))
+
+            elif self.env.intention_channel_encoding == 'nonspatial':
+                relative_position = (0, 0)
+                if not robot.is_idle():
+                    dist = distance(robot_position, robot.target_end_effector_position)
+                    theta = robot_heading - math.atan2(robot.target_end_effector_position[1] - robot_position[1], robot.target_end_effector_position[0] - robot_position[0])
+                    relative_position = (dist * math.sin(theta), dist * math.cos(theta))
+                for coord in relative_position:
+                    channels.append(self.env.intention_channel_nonspatial_scale * coord * np.ones((Mapper.LOCAL_MAP_PIXEL_WIDTH, Mapper.LOCAL_MAP_PIXEL_WIDTH), dtype=np.float32))
+
+        return channels
 
     def _create_padded_room_zeros(self):
         return Mapper.create_padded_room_zeros(self.env.room_width, self.env.room_length)
