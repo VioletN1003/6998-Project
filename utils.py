@@ -11,6 +11,7 @@ from prompt_toolkit.shortcuts import radiolist_dialog
 from skimage.draw import circle_perimeter
 
 from envs import VectorEnv
+from policies import DQNPolicy, DQNIntentionPolicy
 
 ################################################################################
 # Experiment management
@@ -161,6 +162,12 @@ def get_transition_visualization(state=None, action=None, reward=0):
     return np.concatenate((reward_image, state_vis), axis=0)
 
 ################################################################################
+# Policies
+def get_policy_from_cfg(cfg, *args, **kwargs):
+    policy_cls = DQNIntentionPolicy if cfg.use_predicted_intention else DQNPolicy
+    return policy_cls(cfg, *args, **kwargs)
+
+################################################################################
 # Environment
 
 def apply_misc_env_modifications(cfg_or_kwargs, env_name):
@@ -206,7 +213,9 @@ def get_env_from_cfg(cfg, **kwargs):
         if arg_name in cfg:
             final_kwargs[arg_name] = cfg[arg_name]
         else:
-            raise Exception('kwarg {} not found in config'.format(arg_name))
+            print('kwarg {} not found in config'.format(arg_name))            
+            if arg_name not in {'use_robot_map', 'intention_map_scale', 'intention_map_line_thickness'}:
+                raise Exception
     final_kwargs.update(kwargs)
 
     # Additional modifications for real robot

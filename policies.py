@@ -1,11 +1,10 @@
 import random
-
+import numpy as np
 import torch
 from torchvision import transforms
 
 from envs import VectorEnv
 import networks
-
 
 class Policy:
     def step(self, state):
