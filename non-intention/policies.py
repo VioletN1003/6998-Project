@@ -105,7 +105,7 @@ class MultiFreqPolicy(Policy):
         self.state_width = VectorEnv.get_state_width()
 
         num_robots = sum(sum(g.values()) for g in self.cfg.robot_config)
-        assert num_robots == 1  # Multi-agent not implemented
+        #assert num_robots == 1  # Multi-agent not implemented
 
         # Create policies if not passed in
         if self.policy_high is None:

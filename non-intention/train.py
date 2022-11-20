@@ -319,7 +319,7 @@ class Trainer:
         self.logger = logger
         self.num_robot_groups = self.policy.num_robot_groups
         self.step_time_meter = AverageMeter()
-        assert self.num_robot_groups == 1  # Multi-agent not implemented
+        #assert self.num_robot_groups == 1  # Multi-agent not implemented
 
         # Set up checkpointing
         self.checkpoint_dir = Path(self.cfg.checkpoint_dir)
@@ -495,7 +495,7 @@ class Trainer:
 
 def main(cfg):
     num_robots = sum(sum(g.values()) for g in cfg.robot_config)
-    assert num_robots == 1  # Multi-agent not implemented
+    #assert num_robots == 1  # Multi-agent not implemented
 
     policy = MultiFreqPolicy(cfg, train=True)
     logger = Logger(cfg)

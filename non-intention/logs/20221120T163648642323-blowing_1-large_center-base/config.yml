@@ -7,7 +7,7 @@ blowing_sim_step_target: 100
 blowing_wind_particle_mass: 0.001
 blowing_wind_particle_radius: 0.003
 blowing_wind_particle_sparsity: 2
-checkpoint_dir: null
+checkpoint_dir: checkpoints/20221120T163648642323-blowing_1-large_center-base
 checkpoint_freq: 1000
 checkpoint_freq_mins: 30
 checkpoint_path: null
@@ -23,7 +23,7 @@ grad_norm_clipping: 100
 inactivity_cutoff_per_robot: 100
 learning_rate: 0.01
 learning_starts_frac: 0.025
-log_dir: null
+log_dir: logs/20221120T163648642323-blowing_1-large_center-base
 logs_dir: null
 num_input_channels: 4
 num_low_steps_per_mid_step: 0
@@ -44,7 +44,7 @@ robot_config:
 robot_map_scale: 1.0
 room_length: 1.0
 room_width: 1.0
-run_name: null
+run_name: 20221120T163648642323-blowing_1-large_center-base
 shortest_path_map_scale: 0.25
 show_gui: false
 slowing_sim_step_target: 50
