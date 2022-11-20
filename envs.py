@@ -1184,7 +1184,7 @@ class PushingRobot(Robot):
         self.object_dist_closer += dist_closer
 
 class BlowingRobot(Robot):
-    NUM_OUTPUT_CHANNELS = 2
+    NUM_OUTPUT_CHANNELS = 1
     BLOWER_THICKNESS = 0.015
     TUBE_LENGTH = 0.025
     TUBE_BASE_HEIGHT = 0.019

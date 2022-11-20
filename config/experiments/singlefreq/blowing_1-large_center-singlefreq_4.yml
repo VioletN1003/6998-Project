@@ -21,6 +21,9 @@ exploration_frac: 0.1
 final_exploration: 0.01
 grad_norm_clipping: 100
 inactivity_cutoff_per_robot: 100
+intention_channel_encoding: spatial
+intention_channel_nonspatial_scale: 0.025
+intention_map_encoding: ramp
 learning_rate: 0.01
 learning_starts_frac: 0.025
 log_dir: null
@@ -40,7 +43,7 @@ policy_path: null
 replay_buffer_size: 10000
 robot_collision_penalty: 1.0
 robot_config:
--   blowing_robot: 1
+-   blowing_robot: 2
 robot_map_scale: 1.0
 room_length: 1.0
 room_width: 1.0
@@ -52,6 +55,12 @@ success_reward: 1.0
 target_update_freq: 4000
 total_timesteps: 80000
 train_freq: 4
+use_predicted_intention: false
+use_predicted_intention_frac: 0.9
+use_egl_renderer: true
+use_history_map: false
+use_intention_channels: false
+use_intention_map: true
 use_distance_to_receptacle_map: false
 use_double_dqn: true
 use_partial_observations: true
@@ -60,4 +69,4 @@ use_shortest_path_map: true
 use_shortest_path_movement: true
 use_shortest_path_partial_rewards: true
 use_shortest_path_to_receptacle_map: true
-weight_decay: 0
+weight_decay: 0.0001
