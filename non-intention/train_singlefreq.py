@@ -192,10 +192,10 @@ class CollectWorker(Process):
         if done:
             # Logging
             logging_info = {'scalars': {}, 'images': {}}
-            for name in ['steps', 'simulation_steps', 'total_cubes', 'total_robot_collisions']:
+            for name in ['steps', 'simulation_steps', 'total_objects', 'total_obstacle_collisions']:
                 logging_info['scalars'][f'total/{name}'] = info[name]
             for i in range(self.num_robot_groups):
-                for name in ['cumulative_cubes', 'cumulative_distance', 'cumulative_reward', 'cumulative_robot_collisions']:
+                for name in ['cumulative_objects', 'cumulative_distance', 'cumulative_reward', 'cumulative_robot_collisions']:
                     logging_info['scalars'][f'cumulative/{name}/robot_group_{i + 1:02}'] = np.mean(info[name][i])
 
             # Reset env
