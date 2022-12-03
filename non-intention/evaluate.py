@@ -1,3 +1,4 @@
+
 import argparse
 
 # Prevent numpy from using up all cpu
@@ -6,7 +7,7 @@ os.environ['MKL_NUM_THREADS'] = '1'  # pylint: disable=wrong-import-position
 
 import numpy as np
 import utils
-from policies import MultiFreqPolicy
+from policies import DQNPolicy
 
 def run_eval(cfg, num_episodes=20):
     # Check that output dir exists
@@ -20,19 +21,20 @@ def run_eval(cfg, num_episodes=20):
     env = utils.get_env_from_cfg(cfg, random_seed=random_seed)
 
     # Create policy
-    policy = MultiFreqPolicy(cfg, random_seed=random_seed)
+    policy = DQNPolicy(cfg, random_seed=random_seed)
 
     # Run policy
     data = [[] for _ in range(num_episodes)]
     episode_count = 0
     state = env.reset()
     while True:
-        action, policy_info = policy.step(state, debug=True)
+        #print(state)
+        action, policy_info = policy.step(state, debug=True) #action, policy_info = policy.step(state, debug=True)
         state, _, done, info = env.step(action)
         data[episode_count].append({
             'simulation_steps': info['simulation_steps'],
             'objects': info['total_objects'],
-            'policy_levels': policy_info['levels'],
+            'policy_info': policy_info['output'],
         })
 
         if done:
@@ -41,7 +43,7 @@ def run_eval(cfg, num_episodes=20):
             if episode_count >= num_episodes:
                 break
             state = env.reset()
-            policy.reset()
+            #policy.reset()
 
     env.close()
 

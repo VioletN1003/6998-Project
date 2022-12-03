@@ -6,7 +6,6 @@ from torchvision import transforms
 from envs import VectorEnv
 import networks
 
-
 class Policy:
     def step(self, state):
         raise NotImplementedError
@@ -83,6 +82,7 @@ class DQNPolicy(Policy):
                             a = random.randrange(VectorEnv.get_action_space(robot_type))
                         else:
                             a = o.view(1, -1).max(1)[1].item()
+                        #print(a)
                         action[i][j] = a
                         output[i][j] = o.cpu().numpy()
                 if self.train:
@@ -91,7 +91,7 @@ class DQNPolicy(Policy):
         if debug:
             info = {'output': output}
             return action, info
-
+        #print(action)
         return action
 
 class MultiFreqPolicy(Policy):

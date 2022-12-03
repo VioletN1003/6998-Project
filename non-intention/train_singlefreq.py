@@ -143,6 +143,13 @@ class Logger:
         if self.train_summary_writer is None:
             self.train_summary_writer = SummaryWriter(log_dir=str(self.log_dir / 'train'))
             self.visualization_summary_writer = SummaryWriter(log_dir=str(self.log_dir / 'visualization'))
+            
+    def get_loss(self):
+        ret = []
+        for name, meter in self.meters.items():
+            if 'loss' in name or 'td_error' in name:
+                ret.append((name, meter.avg))
+        return ret
 
 class CollectWorker(Process):
     def __init__(self, cfg, worker_index=0, conn=None):
@@ -446,52 +453,56 @@ def main(cfg):
 
     learning_starts = round(cfg.learning_starts_frac * cfg.total_timesteps)
     total_timesteps_with_warm_up = learning_starts + cfg.total_timesteps
-    for timestep in tqdm(range(start_timestep, total_timesteps_with_warm_up), initial=start_timestep, total=total_timesteps_with_warm_up, file=sys.stdout):
+    with tqdm(range(start_timestep, total_timesteps_with_warm_up), initial=start_timestep, total=total_timesteps_with_warm_up, file=sys.stdout) as tepoch:
+        for timestep in tepoch:
 
-        step_start_time = time.time()
+            step_start_time = time.time()
 
-        # Run one collect step
-        exploration_eps = 1 - (1 - cfg.final_exploration) * min(1, max(0, timestep - learning_starts) / (cfg.exploration_frac * cfg.total_timesteps))
-        transitions_per_buffer, done = collector.step(exploration_eps)
+            # Run one collect step
+            exploration_eps = 1 - (1 - cfg.final_exploration) * min(1, max(0, timestep - learning_starts) / (cfg.exploration_frac * cfg.total_timesteps))
+            transitions_per_buffer, done = collector.step(exploration_eps)
 
-        # Store transitions
-        trainer.store_transitions(transitions_per_buffer)
+            # Store transitions
+            trainer.store_transitions(transitions_per_buffer)
 
-        # Train networks
-        if timestep >= learning_starts and (timestep + 1) % cfg.train_freq == 0:
-            trainer.step()
+            # Train networks
+            if timestep >= learning_starts and (timestep + 1) % cfg.train_freq == 0:
+                trainer.step()
 
-        # Update target networks
-        if (timestep + 1) % cfg.target_update_freq == 0:
-            trainer.update_target_networks()
+            # Update target networks
+            if (timestep + 1) % cfg.target_update_freq == 0:
+                trainer.update_target_networks()
+                
+            ll = logger.get_loss()
+            tepoch.set_postfix(ll)
 
-        # Logging
-        if done:
-            if timestep >= learning_starts:
-                trainer.write_logs()
-            num_episodes += 1
-            logger.scalar('train/episodes', num_episodes)
-            logger.scalar('train/exploration_eps', exploration_eps)
-            logger.scalar('timing/eta', trainer.step_time_meter.avg * (total_timesteps_with_warm_up - timestep) / 3600, add_hostname=True)
-            logger.flush(timestep + 1)
+            # Loggingftd
+            if done:
+                if timestep >= learning_starts:
+                    trainer.write_logs()
+                num_episodes += 1
+                logger.scalar('train/episodes', num_episodes)
+                logger.scalar('train/exploration_eps', exploration_eps)
+                logger.scalar('timing/eta', trainer.step_time_meter.avg * (total_timesteps_with_warm_up - timestep) / 3600, add_hostname=True)
+                logger.flush(timestep + 1)
 
-        # Save checkpoints
-        save_checkpoint = False
-        if (timestep + 1) % cfg.checkpoint_freq == 0:
-            if last_checkpoint_time < 0:
-                if time.time() + last_checkpoint_time > 0:
+            # Save checkpoints
+            save_checkpoint = False
+            if (timestep + 1) % cfg.checkpoint_freq == 0:
+                if last_checkpoint_time < 0:
+                    if time.time() + last_checkpoint_time > 0:
+                        save_checkpoint = True
+                elif time.time() - last_checkpoint_time > 60 * cfg.checkpoint_freq_mins:
                     save_checkpoint = True
-            elif time.time() - last_checkpoint_time > 60 * cfg.checkpoint_freq_mins:
+            if timestep + 1 == total_timesteps_with_warm_up:
                 save_checkpoint = True
-        if timestep + 1 == total_timesteps_with_warm_up:
-            save_checkpoint = True
-        if save_checkpoint:
-            trainer.save_checkpoint(timestep + 1, num_episodes)
-            last_checkpoint_time = time.time()
+            if save_checkpoint:
+                trainer.save_checkpoint(timestep + 1, num_episodes)
+                last_checkpoint_time = time.time()
 
-        # Log step time
-        step_time = time.time() - step_start_time
-        trainer.step_time_meter.update(step_time)
+            # Log step time
+            step_time = time.time() - step_start_time
+            trainer.step_time_meter.update(step_time)
 
     # Shut down environments
     collector.close()
