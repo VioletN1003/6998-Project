@@ -40,7 +40,7 @@ policy_path: null
 replay_buffer_size: 10000
 robot_collision_penalty: 1.0
 robot_config:
--   blowing_robot: 1
+-   blowing_robot: 2
 robot_map_scale: 1.0
 room_length: 1.0
 room_width: 1.0
